@@ -8,7 +8,7 @@ In this example, we are going to assume that you have cloned this project under 
 
 It also does work under linux, but I did not write documentation for that yet.
 
-* Download and install python 3.7 https://www.python.org/downloads/windows/
+* Download and install python 3.7 or higher https://www.python.org/downloads/windows/
 * Download and install node js LTS https://nodejs.org/en/download/
 * Install yarn as administrator:
 
