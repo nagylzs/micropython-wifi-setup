@@ -4,6 +4,8 @@ import serial
 import time
 import sys
 import os
+import select
+from enum import Enum
 from typing import Optional
 
 EOL = b'\r\n'
@@ -18,8 +20,17 @@ IDENT = '    '
 MAX_WRITE_PER_PASS = 64
 MAX_READ_PER_PASS = 64
 
+# http://www.physics.udel.edu/~watson/scen103/ascii.html
+CTRL_A = b'\x01'
+CTRL_B = b'\x02'
+CTRL_C = b'\x03'
+CTRL_D = b'\x04'
+CTRL_E = b'\x05'
+CTRL_F = b'\x06'
+CTRL_G = b'\x07'
 
-class Commands:
+
+class Commands(Enum):
     RESET = "reset"
     LS = "ls"
     MKDIR = "mkdir"
@@ -27,7 +38,14 @@ class Commands:
     RMTREE = "rmtree"
     UPLOAD = "upload"
     DOWNLOAD = "download"
+    EXECUTE_FILE = "execute_file"
     EXECUTE = "execute"
+    LIVE_TEST_FILE = "live_test_file"
+
+
+VALID_COMMANDS = []
+for item in Commands:
+    VALID_COMMANDS.append(item.value)
 
 
 class StatResult:
@@ -66,11 +84,14 @@ class EspSyncer:
         self.logger = logger
         self.os_imported = False
 
-    def reset(self):
+    def reset(self, esp32r0_delay=False):
         # See https://github.com/espressif/esptool/blob/master/esptool.py#L411 - these are active low
-        self.ser.setRTS(False)
+
+        self.ser.setDTR(False)  # IO0=HIGH
+        self.ser.setRTS(True)  # EN=LOW, chip in reset
         time.sleep(0.5)
-        self.ser.setRTS(True)
+        self.ser.setRTS(False)  # EN=LOW, chip in reset
+        data = self.recv(b">>>")
 
     def send(self, data):
         """Send data to MicroPython prompt.
@@ -86,15 +107,129 @@ class EspSyncer:
         This receives data until the given terminator."""
         started = time.time()
         while terminator not in self.buffer:
-            self.buffer += self.ser.read()
+            data = self.ser.read()
+            self.buffer += data
             elapsed = time.time() - started
-            if elapsed > self.timeout:
+            if self.timeout is not None and elapsed > self.timeout:
                 raise TimeoutError
 
         idx = self.buffer.find(terminator)
         chunk = self.buffer[:idx]
         self.buffer = self.buffer[idx + len(terminator):]
         return chunk
+
+    def dump(self):
+        while True:
+            data = self.ser.read()
+            try:
+                s = data.decode("ascii")
+            except UnicodeDecodeError:
+                s = repr(s)
+                sys.stdout.write(s)
+                sys.stdout.flush()
+
+    def enter_raw_mode(self):
+        # http://www.physics.udel.edu/~watson/scen103/ascii.html
+        self.send(CTRL_A)
+        self.recv(terminator=b'raw REPL; CTRL-B to exit')
+
+    def enter_paste_mode(self):
+        self.send(CTRL_E)
+
+    def exit_paste_mode(self):
+        self.send(CTRL_D)
+
+    def communicate(self, stdin, stdout, sdtin_encoding=None, stdout_encoding=None,
+                    absolute_timeout=None, timeout=1, paste_mode=True, watch_file_path=None,
+                    no_select=False):
+        """Communicate with device. Connects stdin and stdout with the serial line of the device.
+
+        :param stdin: Input file (file-like object)
+        :param stdout: Output file (file-like ojbect)
+        :param sdtin_encoding: If the input file is not binary, then specify its encoding here
+        :param sdtin_encoding: If the input file is not binary, then specify its encoding here
+        :param stdout_is_binary: If the output file is not binary, then specify its encoding here.
+        :param absolute_timeout: Absolute timeout for communication.Effective ONLY when it is not None.
+        :param timeout: Timeout between read/write operations. None means infinite.
+        :param paste_mode: Post all data in paste mode, then exit paste mode. In this mode, we presume
+            that the whole input file can be read within 1 second.
+        :param watch_file_path: When specified, it should be a file path. This file will be monitored, and when it
+            is changed, then communicate() will return True. This can be used to continuously monitor
+            for file changes of test scripts, and re-execute them on the MCU when they are changed.
+        :param no_select: When this flag is set, the input file is read at once. When this flag is not set (default),
+            the input file is read continuously when data is available (it is checked with select.select).
+        """
+        if paste_mode:
+            self.enter_paste_mode()
+        sendbuf = b''
+        started, absolute_elapsed = time.time(), 0
+        last_comm, elapsed = started, 0
+        eof_reached = False
+        paste_mode_exited = False
+        if watch_file_path:
+            last_changed = os.stat(watch_file_path).st_mtime
+        else:
+            last_changed = 0
+        if no_select:
+            sendbuf = stdin.read()
+            eof_reached = True
+        while True:
+            was_comm = False
+
+            if not no_select:
+                # stdin -> buf
+                rlist, wlist, xlist = select.select([stdin], [], [], 0.01)
+                if rlist:
+                    data = stdin.read()
+                    if data:
+                        was_comm = True
+                        if sdtin_encoding:
+                            data = data.decode(sdtin_encoding)
+                        sendbuf += data
+                    elif not sendbuf:
+                        # select.select returns the file, but it reads as an empty string -> EOF reached.
+                        if not eof_reached:
+                            eof_reached = True
+
+            if eof_reached and not paste_mode_exited:
+                sendbuf += CTRL_D  # exit paste mode
+                paste_mode_exited = True
+
+            # buf -> MCU
+            if sendbuf:
+                sent = self.ser.write(sendbuf)
+                sendbuf = sendbuf[sent:]
+                was_comm = True
+
+            # MCU -> stdout
+            if self.ser.in_waiting:
+                data = self.ser.read(self.ser.in_waiting)
+                if stdout_encoding:
+                    stdout.write(data.decode(stdout_encoding))
+                else:
+                    stdout.write(data)
+                stdout.flush()
+                was_comm = True
+
+            now = time.time()
+            absolute_elapsed = now - started
+            if was_comm:
+                last_comm, elapsed = now, 0
+            else:
+                elapsed = now - last_comm
+
+            if absolute_timeout is not None:
+                if absolute_timeout < absolute_elapsed:
+                    raise TimeoutError("AbsoluteTimeoutError")
+
+            if timeout is not None:
+                if timeout < elapsed:
+                    raise TimeoutError("TimeoutError")
+
+            if watch_file_path:
+                changed = os.stat(watch_file_path).st_mtime
+                if changed != last_changed:
+                    return True
 
     def __call__(self, cmd, terminator=DEFAULT_TERMINATOR, expect_echo=True):
         """Send a single line of command and return the result."""
@@ -134,7 +269,7 @@ class EspSyncer:
         assert realpath.startswith("/")
         parts = realpath[1:].split("/")
         for idx in range(len(parts)):
-            path = "/" + "/".join(parts[:idx+1])
+            path = "/" + "/".join(parts[:idx + 1])
             st = self.stat(path)
             if st is None:
                 self.mkdir(path)
@@ -352,6 +487,7 @@ class EspSyncer:
         else:
             self._download(src, dst, overwrite, quick)
 
+
 class Main:
     def __init__(self, args):
         self.args = args
@@ -365,28 +501,71 @@ class Main:
         started = time.time()
         with serial.Serial(self.args.port, baudrate=self.args.baudrate, timeout=self.args.timeout) as ser:
             syncer = EspSyncer(ser, self.args.timeout, self.log)
-            if command == Commands.RESET:
-                syncer.reset()
-            elif command == Commands.LS:
+            syncer.reset()
+            if command == Commands.RESET.value:
+                # syncer.reset()
+                pass
+            elif command == Commands.LS.value:
                 print(syncer.ls(params[0]))
-            elif command == Commands.MKDIR:
+            elif command == Commands.MKDIR.value:
                 self.log("MKDIR " + params[0] + "\n")
                 syncer.mkdir(params[0])
-            elif command == Commands.MAKEDIRS:
+            elif command == Commands.MAKEDIRS.value:
                 self.log("MAKEDIRS " + params[0] + "\n")
                 syncer.makedirs(params[0])
-            elif command == Commands.RMTREE:
+            elif command == Commands.RMTREE.value:
                 syncer.rmtree(params[0])
-            elif command == Commands.UPLOAD:
+            elif command == Commands.UPLOAD.value:
                 syncer.upload(params[0], params[1], self.args.contents, self.args.overwrite, self.args.quick)
-            elif command == Commands.DOWNLOAD:
+            elif command == Commands.DOWNLOAD.value:
                 syncer.download(params[0], params[1], self.args.contents, self.args.overwrite, self.args.quick)
-            elif command == Commands.EXECUTE:
-                for line in open(params[0], "r"):
-                    self.log(line)
-                    syncer(line, expect_echo=False)
+            elif command in [Commands.EXECUTE_FILE.value, Commands.LIVE_TEST_FILE.value]:
+                if args.output:
+                    if args.output == "-":
+                        fout = sys.stdout
+                        stdout_encoding = "utf-8"
+                    else:
+                        fout = open(args.output, "ba")
+                        stdout_encoding = None
+                else:
+                    fout = None
+                    stdout_encoding = None
+                if not params:
+                    raise SystemExit("execute_file takes a filename argument (or use '--' for stdin)")
+                watch_file_path = None
+                if params[0] == "-":
+                    fin = sys.stdin
+                    stdin_encoding = "utf-8"
+                    is_regular_file = False
+                    if command == Commands.LIVE_TEST_FILE.value:
+                        raise SystemExit("cannot live test stdin, it would not be possible to watch for changes")
+                else:
+                    fin = open(params[0], "rb")
+                    stdin_encoding = None
+                    is_regular_file = True
+                    if command == Commands.LIVE_TEST_FILE.value:
+                        watch_file_path = params[0]
+                while True:
+                    rerun = syncer.communicate(fin, fout, stdin_encoding, stdout_encoding,
+                                               watch_file_path=watch_file_path, no_select=is_regular_file,
+                                               timeout=args.timeout)
+                    if rerun:
+                        fin.close()
+                        fin = open(params[0], "rb")
+                        syncer.reset()
+                    else:
+                        break
+
+            elif command == Commands.EXECUTE.value:
+                self.log(params[0])
+                syncer(params[0], expect_echo=False)
+            elif command == Commands.COMMUNICATE.value:
+                syncer.communicate(stdin=sys.stdin, stdout=sys.stdout)
             else:
                 parser.error("Invalid command: %s" % command)
+
+            if self.args.dump:
+                syncer.dump()
         if self.args.verbose:
             print("Total time elapsed: %.2fs" % (time.time() - started))
 
@@ -405,10 +584,15 @@ if __name__ == "__main__":
     parser.add_argument("-b", "--baudrate", dest='baudrate', type=int, default=DEFAULT_BAUD_RATE,
                         help="Baud rate, default is %s" % DEFAULT_BAUD_RATE)
     parser.add_argument("-t", "--timeout", dest='timeout', type=int, default=DEFAULT_TIMEOUT,
-                        help="Timeout, default is %s" % DEFAULT_TIMEOUT)
+                        help="Timeout, default is %s. Any non-positive value means infinite." % DEFAULT_TIMEOUT)
     parser.add_argument("-p", "--port", dest='port', help="Port to be used", default=None)
 
-    parser.add_argument(dest='command', default=None, help="Command to be executed: ls")
+    parser.add_argument("--output", dest='output', default=None,
+                        help="Output file. Messages received from MCU will be written here. For stdout, use '-'.")
+
+    parser.add_argument(dest='command', default=None,
+                        help="Command to be executed. Valid commands are:  " + "\n    ".join(VALID_COMMANDS) +
+                             " For reading data from stdin, use execute_file -")
     parser.add_argument(dest='params', default=[], nargs='*')
 
     args = parser.parse_args()
@@ -419,5 +603,8 @@ if __name__ == "__main__":
             parser.error("Either --port must be given or ESP_PORT environment variable must be set.")
     if args.command is None:
         parser.error("You must give a command.")
+
+    if args.timeout <= 0:
+        args.timeout = None
 
     Main(args).run(args.command, args.params)
