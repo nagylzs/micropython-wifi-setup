@@ -563,9 +563,6 @@ class Main:
                 syncer.communicate(stdin=sys.stdin, stdout=sys.stdout)
             else:
                 parser.error("Invalid command: %s" % command)
-
-            if self.args.dump:
-                syncer.dump()
         if self.args.verbose:
             print("Total time elapsed: %.2fs" % (time.time() - started))
 

@@ -6,4 +6,4 @@ from mp_tools import *
 MYDIR = os.path.split(os.path.abspath(__file__))[0]
 TEST_BACKEND_DIR = os.path.join(MYDIR, "test_backend")
 
-sync("--quick --overwrite --contents upload %s /" % TEST_BACKEND_DIR)
+sync(["--quick", "--overwrite", "--contents", "upload", TEST_BACKEND_DIR, "/"])

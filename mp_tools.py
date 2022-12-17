@@ -23,26 +23,25 @@ LATEST_ESP32_FIRMWARE = ESP32_FIRMWARES[-1]
 LATEST_ESP32_FIRMWARE_PATH = os.path.join(MP_FIRMWARES, "esp32", LATEST_ESP32_FIRMWARE)
 
 ESP_SYNC = os.path.join(MP_TOOLS, "espsyncer.py")
-ESP_SYNC_CMD = "%s %s -v " % (sys.executable, ESP_SYNC)
+ESP_SYNC_CMD = [sys.executable, ESP_SYNC, "-v"]
 
 ESP_PORT = os.environ["ESP_PORT"]
-ESP_TOOL_CMD = "esptool.py --port %s" % ESP_PORT
+ESP_TOOL_CMD = ["esptool.py", "--port", ESP_PORT]
 
-ESP_MINIFY_CMD = "%s %s/esp_minify_www.py" % (sys.executable, MP_TOOLS)
-
+ESP_MINIFY_CMD = [sys.executable, os.path.join(MP_TOOLS, "esp_minify_www.py") ]
 
 def run(cmd):
     print("RUN: ", cmd)
-    subprocess.run(cmd, shell=True, check=True)
+    subprocess.run(cmd, check=True)
 
 
-def sync(args_str):
-    run(ESP_SYNC_CMD + " " + args_str)
+def sync(args: list):
+    run(ESP_SYNC_CMD + args)
 
 
-def esptool(args_str):
-    run(ESP_TOOL_CMD + " " + args_str)
+def esptool(args: list):
+    run(ESP_TOOL_CMD + + args)
 
 
-def minify(args_str):
-    run(ESP_MINIFY_CMD + " " + args_str)
+def minify(args: list):
+    run(ESP_MINIFY_CMD + args)
