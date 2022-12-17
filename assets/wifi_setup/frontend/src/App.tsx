@@ -95,7 +95,7 @@ export class API {
     const url = this.server + "api/" + new Buffer(JSON.stringify(params)).toString('hex');
     return fetch(url)
       .then((response) => { return response.json(); })
-      .catch((error) => { showError(error.toString()); return Promise.reject(error); });
+      .catch((error) => { showError(""+error); return Promise.reject(error); });
   }
 
   public scan_wifi_networks = async (): Promise<IWifiNetworkInfo[]> => {
@@ -215,7 +215,7 @@ class App extends React.Component<IAppProps, IAppState> {
       this.setState({ loading: false, networks });
     } catch (error) {
       console.log(error);
-      showError(error.toString());
+      showError(""+error);
     }
   }
 
@@ -225,7 +225,7 @@ class App extends React.Component<IAppProps, IAppState> {
       await api.reset();
     } catch (error) {
       console.log(error);
-      showError(error.toString());
+      showError(""+error);
     }
   }
 
@@ -237,7 +237,7 @@ class App extends React.Component<IAppProps, IAppState> {
       this.setState({ loading: false, networks, params });
     } catch (error) {
       console.log(error);
-      showError(error.toString());
+      showError(""+error);
     }
   }
 
@@ -344,7 +344,7 @@ class App extends React.Component<IAppProps, IAppState> {
       this.setState({ try_status: "Várakozás a kapcsolódásra...", try_elapsed: 0 });
       setTimeout(this.monitorCurrentNetwork, 500);
     } catch (error) {
-      showError(error.toString());
+      showError(""+error);
       this.setState({ try_status: null, connecting: false });
     }
   }
@@ -400,7 +400,7 @@ class App extends React.Component<IAppProps, IAppState> {
         )
       }
     } catch (error) {
-      showError(error.toString());
+      showError(""+error);
       this.setState({ try_status: null, connecting: false });
     }
   }
